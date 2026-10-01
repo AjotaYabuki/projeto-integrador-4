@@ -1,0 +1,173 @@
+import network
+import time
+import ujson
+import math
+from machine import ADC, Pin
+from umqtt.simple import MQTTClient
+
+# ===== CONFIG WiFi =====
+SSID = "SEU_SSID"
+PASSWORD = "SUA_SENHA"
+
+# ===== CONFIG MQTT =====
+MQTT_SERVER = "test.mosquitto.org"
+MQTT_PORT   = 1883
+MQTT_TOPIC  = "consumo/residencia_01"
+
+# ===== PINOS =====
+PINO_ACS712 = 34
+PINO_ZMPT   = 35
+
+adc_corrente = ADC(Pin(PINO_ACS712))
+adc_corrente.atten(ADC.ATTN_11DB)   # leitura até ~3.3V
+adc_corrente.width(ADC.WIDTH_12BIT)
+
+adc_tensao = ADC(Pin(PINO_ZMPT))
+adc_tensao.atten(ADC.ATTN_11DB)
+adc_tensao.width(ADC.WIDTH_12BIT)
+
+# ===== CALIBRAÇÃO E FILTRO =====
+ACS_SENSIBILIDADE = 0.066   # 66 mV/A
+ACS_OFFSET        = 1.65    # Metade de 3.3V
+
+ZMPT_OFFSET           = 1.65  
+ZMPT_FATOR_CALIBRACAO = 120.0 # Ajuste na prática com um multímetro
+
+FATOR_SUAVIZACAO = 0.2      # Peso da leitura nova (20%). Leituras antigas mantêm 80%.
+
+# ===== FUNÇÕES =====
+
+def conecta_wifi():
+    print("Conectando ao WiFi:", SSID)
+    wifi = network.WLAN(network.STA_IF)
+    wifi.active(True)
+    wifi.connect(SSID, PASSWORD)
+
+    while not wifi.isconnected():
+        print(".", end="")
+        time.sleep(0.5)
+
+    print("\nWiFi conectado!")
+    print("IP:", wifi.ifconfig()[0])
+
+
+def conecta_mqtt():
+    global client
+    client = MQTTClient("ESP32", MQTT_SERVER, port=MQTT_PORT)
+
+    while True:
+        try:
+            print("Conectando ao MQTT...")
+            client.connect()
+            print("Conectado ao broker!")
+            break
+        except Exception as e:
+            print("Falha:", e)
+            print("Tentando novamente em 5s...")
+            time.sleep(5)
+
+
+def ler_corrente_rms():
+    soma_quadrados = 0
+    amostras = 0
+    tempo_inicio = time.ticks_ms()
+
+    while time.ticks_diff(time.ticks_ms(), tempo_inicio) < 100:
+        leitura = adc_corrente.read()
+        tensao_sensor = (leitura / 4095.0) * 3.3
+        tensao_sem_offset = tensao_sensor - ACS_OFFSET
+        
+        soma_quadrados += (tensao_sem_offset * tensao_sem_offset)
+        amostras += 1
+
+    if amostras == 0:
+        return 0.0
+
+    media_quadrados = soma_quadrados / amostras
+    tensao_rms = math.sqrt(media_quadrados)
+    corrente_rms = tensao_rms / ACS_SENSIBILIDADE
+
+    # Filtro bruto de hardware
+    if corrente_rms < 0.05:
+        corrente_rms = 0.0
+
+    return corrente_rms
+
+
+def ler_tensao_rms():
+    soma_quadrados = 0
+    amostras = 0
+    tempo_inicio = time.ticks_ms()
+
+    while time.ticks_diff(time.ticks_ms(), tempo_inicio) < 100:
+        leitura = adc_tensao.read()
+        tensao_sensor = (leitura / 4095.0) * 3.3
+        tensao_sem_offset = tensao_sensor - ZMPT_OFFSET
+        
+        soma_quadrados += (tensao_sem_offset * tensao_sem_offset)
+        amostras += 1
+
+    if amostras == 0:
+        return 0.0
+
+    media_quadrados = soma_quadrados / amostras
+    tensao_pino_rms = math.sqrt(media_quadrados)
+    
+    tensao_real_rms = tensao_pino_rms * ZMPT_FATOR_CALIBRACAO
+    return tensao_real_rms
+
+
+# ===== MAIN =====
+
+conecta_wifi()
+conecta_mqtt()
+
+# Variáveis globais para o filtro
+corrente_filtrada = 0.0
+tensao_filtrada = 0.0
+primeira_leitura = True
+
+while True:
+    try:
+        # 1. Extração True RMS da onda AC
+        corrente_atual = ler_corrente_rms()
+        tensao_atual   = ler_tensao_rms()
+        
+        # 2. Aplicação do Filtro de Média Ponderada
+        if primeira_leitura:
+            # Pula o filtro na primeira rodada para evitar rampa a partir de zero
+            corrente_filtrada = corrente_atual
+            tensao_filtrada = tensao_atual
+            primeira_leitura = False
+        else:
+            # Média Ponderada
+            corrente_filtrada = (corrente_atual * FATOR_SUAVIZACAO) + (corrente_filtrada * (1.0 - FATOR_SUAVIZACAO))
+            tensao_filtrada = (tensao_atual * FATOR_SUAVIZACAO) + (tensao_filtrada * (1.0 - FATOR_SUAVIZACAO))
+
+        # Trava final de ruído (caso o filtro gere um resíduo muito pequeno após desligar a carga)
+        if corrente_filtrada < 0.05:
+            corrente_filtrada = 0.0
+
+        # 3. Cálculo de Potência com dados limpos
+        potencia_aparente = corrente_filtrada * tensao_filtrada
+
+        print("Corrente (A): {:.2f} | Tensão (V): {:.1f} | Potência Aparente (VA): {:.1f}".format(
+            corrente_filtrada, tensao_filtrada, potencia_aparente))
+
+        dados = {
+            "id": "residencia_01",
+            "corrente": round(corrente_filtrada, 2),
+            "tensao": round(tensao_filtrada, 1),
+            "potencia_aparente": round(potencia_aparente, 1),
+            "timestamp": time.ticks_ms()
+        }
+
+        payload = ujson.dumps(dados)
+
+        client.publish(MQTT_TOPIC, payload)
+
+    except Exception as e:
+        print("Erro no loop:", e)
+        conecta_mqtt()
+
+    time.sleep(1)
