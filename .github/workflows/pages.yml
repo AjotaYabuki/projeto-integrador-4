@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./frontend # Diz ao GitHub para rodar tudo dentro de 'frontend'
+        working-directory: ./frontend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,7 +30,7 @@ jobs:
           node-version: 20
 
       - name: Install dependencies
-        run: npm install # Usar 'install' evita erros se o package-lock estiver desatualizado
+        run: npm install
 
       - name: Build
         run: npm run build
@@ -43,7 +43,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./frontend/dist # Pega a pasta dist de dentro de 'frontend'
+          path: ./frontend/dist
 
   deploy:
     environment:
