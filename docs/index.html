@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor de energia residencial</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#f3f6f6;--card:#fff;--tx:#14282b;--mut:#5d7478;--bd:#d5e0e1;--pri:#0f766e;--al:#c2410c;--ok:#0f766e}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1b1d;--card:#15292c;--tx:#e6f0f0;--mut:#93aeb2;--bd:#27434700;--bd:#274347;--pri:#2dd4bf;--al:#fb923c}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+header{padding:28px 5vw 8px;display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;align-items:end}
+h1{margin:0;font-size:1.6rem;font-weight:650}h2{margin:0 0 10px;font-size:1rem;font-weight:600}
+.sub{color:var(--mut);margin:2px 0 0}.pill{padding:4px 12px;border-radius:99px;border:1px solid var(--bd);color:var(--mut);font-size:.85rem}
+main{padding:12px 5vw 40px;display:grid;gap:14px;grid-template-columns:repeat(12,1fr)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:16px;min-width:0}
+.k{grid-column:span 2}.k b{display:block;font-size:1.5rem;font-weight:650}.k span{color:var(--mut);font-size:.85rem}
+.k.al b{color:var(--al)}
+.w12{grid-column:span 12}.w8{grid-column:span 8}.w6{grid-column:span 6}.w4{grid-column:span 4}
+.box{position:relative;height:260px}.box.t{height:320px}
+table{border-collapse:collapse;width:100%;text-align:center}td,th{padding:10px;border:1px solid var(--bd)}
+.vp,.vn{font-weight:650;color:var(--ok)}.er{color:var(--al);font-weight:650}
+.m{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}.m div{flex:1 1 90px;border-left:3px solid var(--pri);padding-left:8px}
+.m b{display:block;font-size:1.2rem}.m span{color:var(--mut);font-size:.8rem}
+.live{display:flex;align-items:center;gap:8px}.dot{width:10px;height:10px;border-radius:50%;background:var(--mut)}
+.dot.on{background:var(--ok)}.dot.bad{background:var(--al)}
+@media(max-width:900px){.k{grid-column:span 4}.w8,.w6,.w4{grid-column:span 12}}
+@media(max-width:520px){.k{grid-column:span 6}}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Monitor de energia residencial</h1><p class="sub" id="fonte">Carregando dados…</p></div>
+  <div class="pill live"><i class="dot" id="dot"></i><span id="live">Aguardando leituras ao vivo</span></div>
+</header>
+<main>
+  <div class="card k"><b id="k1">–</b><span>Energia (kWh)</span></div>
+  <div class="card k"><b id="k2">–</b><span>Custo estimado</span></div>
+  <div class="card k"><b id="k3">–</b><span>Potência média (W)</span></div>
+  <div class="card k"><b id="k4">–</b><span>Pico (W)</span></div>
+  <div class="card k"><b id="k5">–</b><span>Tensão média (V)</span></div>
+  <div class="card k al"><b id="k6">–</b><span>Leituras anômalas</span></div>
+
+  <div class="card w12"><h2>Potência ativa e anomalias detectadas</h2><div class="box t"><canvas id="cPot"></canvas></div></div>
+  <div class="card w6"><h2>Tensão (V)</h2><div class="box"><canvas id="cV"></canvas></div></div>
+  <div class="card w6"><h2>Corrente (A) e fator de potência</h2><div class="box"><canvas id="cI"></canvas></div></div>
+  <div class="card w4"><h2>Tempo em cada faixa de potência</h2><div class="box"><canvas id="cF"></canvas></div></div>
+  <div class="card w8"><h2>Desempenho do modelo (Random Forest)</h2>
+    <div class="m" id="met"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div><table id="cm"></table></div><div class="box" style="height:200px"><canvas id="cImp"></canvas></div>
+    </div>
+    <p class="sub" id="split"></p></div>
+  <div class="card w6"><h2>Consumo por dia (kWh)</h2><div class="box"><canvas id="cDia"></canvas></div></div>
+  <div class="card w6"><h2>Potência média e % de anomalias por hora</h2><div class="box"><canvas id="cHora"></canvas></div></div>
+  <div class="card w12"><h2>Ao vivo (ESP32 → API)</h2><div class="box"><canvas id="cLive"></canvas></div></div>
+</main>
+<script>
+// Troque pela URL do seu serviço no Render:
+const API_URL = "https://SEU-SERVICO.onrender.com";
+const cs = getComputedStyle(document.documentElement), cor = n => cs.getPropertyValue(n).trim();
+const opt = (extra={}) => ({responsive:true,maintainAspectRatio:false,animation:false,
+  plugins:{legend:{labels:{color:cor('--mut')}}},
+  scales:{x:{ticks:{color:cor('--mut'),maxTicksLimit:8},grid:{display:false}},y:{ticks:{color:cor('--mut')},grid:{color:cor('--bd')}}},...extra});
+const $ = id => document.getElementById(id);
+const pct = v => (v*100).toFixed(1)+"%";
+
+async function carregar(){
+  let d;
+  try{ const r = await fetch(API_URL+"/api/dashboard",{signal:AbortSignal.timeout(15000)}); d = await r.json(); $('fonte').textContent="Dados da API no Render"; ao_vivo(); setInterval(ao_vivo,3000);}
+  catch(e){ d = await (await fetch("dashboard_data.json")).json(); $('fonte').textContent="Dados do último treino (API indisponível)"; }
+  render(d);
+}
+function render(d){
+  const r=d.resumo,s=d.serie;
+  $('k1').textContent=r.energia_kwh.toFixed(4); $('k2').textContent="R$ "+r.custo_rs.toFixed(3);
+  $('k3').textContent=r.potencia_media_w; $('k4').textContent=r.pico_w; $('k5').textContent=r.tensao_media_v;
+  $('k6').textContent=r.anomalias+" de "+r.leituras;
+  new Chart($('cPot'),{type:'line',data:{labels:s.t,datasets:[
+    {label:'Potência ativa (W)',data:s.potencia,borderColor:cor('--pri'),borderWidth:1.5,pointRadius:0,tension:.15},
+    {label:'Anomalia',data:s.potencia.map((p,i)=>s.anomalia[i]?p:null),showLine:false,pointRadius:3,backgroundColor:cor('--al'),borderColor:cor('--al')}]},options:opt()});
+  new Chart($('cV'),{type:'line',data:{labels:s.t,datasets:[{label:'Tensão (V)',data:s.tensao,borderColor:cor('--mut'),borderWidth:1.2,pointRadius:0}]},options:opt()});
+  new Chart($('cI'),{type:'line',data:{labels:s.t,datasets:[
+    {label:'Corrente (A)',data:s.corrente,borderColor:cor('--pri'),borderWidth:1.2,pointRadius:0,yAxisID:'y'},
+    {label:'Fator de potência',data:s.fp,borderColor:cor('--al'),borderWidth:1.2,pointRadius:0,yAxisID:'y1'}]},
+    options:opt({scales:{x:opt().scales.x,y:opt().scales.y,y1:{position:'right',min:0,max:1,grid:{display:false},ticks:{color:cor('--mut')}}}})});
+  new Chart($('cF'),{type:'doughnut',data:{labels:Object.keys(d.faixas),datasets:[{data:Object.values(d.faixas),borderWidth:0,
+    backgroundColor:['#94a3b8','#5eead4','#14b8a6','#0f766e','#c2410c']}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:cor('--mut')}}}}});
+  const m=d.metricas;
+  $('met').innerHTML=[['Acurácia',m.acuracia],['Precisão',m.precisao],['Recall',m.recall],['F1',m.f1]].map(([n,v])=>`<div><b>${pct(v)}</b><span>${n}</span></div>`).join('');
+  const c=d.matriz_confusao;
+  $('cm').innerHTML=`<tr><th></th><th>Previsto: Normal</th><th>Previsto: Anomalia</th></tr>
+   <tr><th>Real: Normal</th><td class="vn">${c[0][0]}</td><td class="er">${c[0][1]}</td></tr>
+   <tr><th>Real: Anomalia</th><td class="er">${c[1][0]}</td><td class="vp">${c[1][1]}</td></tr>`;
+  const im=Object.entries(d.importancias).slice(0,6);
+  new Chart($('cImp'),{type:'bar',data:{labels:im.map(x=>x[0]),datasets:[{label:'Importância',data:im.map(x=>x[1]),backgroundColor:cor('--pri')}]},options:opt({indexAxis:'y',plugins:{legend:{display:false}}})});
+  new Chart($('cDia'),{type:'bar',data:{labels:d.por_dia.dia,datasets:[{label:'kWh',data:d.por_dia.kwh,backgroundColor:cor('--pri')}]},options:opt({plugins:{legend:{display:false}}})});
+  const ph=d.perfil_horario;
+  new Chart($('cHora'),{type:'bar',data:{labels:ph.hora,datasets:[{label:'Potência média (W)',data:ph.potencia,backgroundColor:cor('--pri'),yAxisID:'y'},
+    {type:'line',label:'% leituras anômalas',data:ph.pct_anomalia,borderColor:cor('--al'),pointRadius:2,yAxisID:'y1'}]},
+    options:opt({scales:{x:opt().scales.x,y:opt().scales.y,y1:{position:'right',min:0,grid:{display:false},ticks:{color:cor('--mut')}}}})});
+  const mc=d.metricas_cronologico;
+  $('split').textContent=`Treino: ${d.split.treino} leituras (80%) · Teste: ${d.split.teste} leituras (20%). Teste cronológico (últimos 20% do período): acurácia ${pct(mc.acuracia)}, recall ${pct(mc.recall)}, F1 ${pct(mc.f1)}.`;
+}
+let live;
+async function ao_vivo(){
+  try{
+    const L = await (await fetch(API_URL+"/api/ao_vivo")).json();
+    if(!L.length) return;
+    if(!live) live=new Chart($('cLive'),{type:'line',data:{labels:[],datasets:[{label:'Potência ativa (W)',data:[],borderColor:cor('--pri'),pointRadius:0,borderWidth:1.5},
+      {label:'Anomalia',data:[],showLine:false,pointRadius:4,backgroundColor:cor('--al'),borderColor:cor('--al')}]},options:opt()});
+    live.data.labels=L.map(x=>x.data_hora.slice(11)); live.data.datasets[0].data=L.map(x=>x.potencia_ativa);
+    live.data.datasets[1].data=L.map(x=>x.anomalia?x.potencia_ativa:null); live.update();
+    const u=L[L.length-1]; $('dot').className='dot '+(u.anomalia?'bad':'on');
+    $('live').textContent=u.anomalia?`Anomalia agora: ${u.potencia_ativa} W`:`Normal: ${u.potencia_ativa} W`;
+  }catch(e){}
+}
+carregar();
+</script>
+</body>
+</html>

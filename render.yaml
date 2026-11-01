@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: energia-ml-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt && python train.py
+    # 1 processo só: o histórico ao vivo fica na memória do processo
+    startCommand: gunicorn app:app --workers 1 --threads 4
+    plan: free
+    envVars:
+      - key: ESP32_KEY        # opcional: se definir, o ESP32 precisa enviar o header X-API-Key
+        sync: false
+      - key: CORS_ORIGINS     # opcional: ex. http://localhost:5173,https://SEU_USUARIO.github.io
+        sync: false
